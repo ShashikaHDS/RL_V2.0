@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Models and logs (large binary files)
+models/
+logs/
+loading/
+
+# Large binary files
+*.zip
+*.pkl
+*.npy
+
+# Results (regenerable)
+sensitivity_analysis/
+sensitivity_results/
+*.png
+*.csv
+
+# IDE / editor
+.vscode/
+.idea/
+.claude/
+
+# OS
+Thumbs.db
+.DS_Store
