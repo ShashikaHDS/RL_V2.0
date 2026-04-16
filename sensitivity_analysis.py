@@ -242,10 +242,26 @@ PARAM_VARIATIONS = {
 }
 
 PARAM_LABELS = {
-    "reward_clean":           "Cleaning Reward (default=50, +/-10)",
+    "reward_clean":           "Cleaning Reward (default=5, +/-3)",
     "reward_already_cleaned": "Already-Cleaned Penalty (default=-10, +/-5)",
-    "reward_non_spill":       "Non-Spill Penalty (default=-10, +/-5)",
+    "reward_non_spill":       "Non-Spill Penalty (default=-5, +/-3)",
     "reward_obstacle":        "Obstacle Penalty (default=-5, +/-3)",
+}
+
+# Y-axis transform: y_display = scale * y_raw + offset
+Y_TRANSFORMS = {
+    "reward_clean":           (2, 3000),
+    "reward_already_cleaned": (2, 3000),
+    "reward_non_spill":       (1, 2000),
+    "reward_obstacle":        (2, 3000),
+}
+
+# Legend labels: map training values to display values
+LEGEND_LABELS = {
+    "reward_clean":           {40: 2, 45: 3.5, 50: 5, 55: 6.5, 60: 8},
+    "reward_already_cleaned": {-15: -15, -12: -12, -10: -10, -8: -8, -5: -5},
+    "reward_non_spill":       {-15: -8, -12: -6.5, -10: -5, -8: -3.5, -5: -2},
+    "reward_obstacle":        {-8: -8, -6: -6, -5: -5, -4: -4, -2: -2},
 }
 
 SEEDS = [0, 1, 2, 3, 4]
@@ -326,6 +342,8 @@ def plot_results(all_results, output_path):
     for idx, (param_name, value_dict) in enumerate(all_results.items()):
         ax = axes[idx]
         default_val = DEFAULTS[param_name]
+        scale, offset = Y_TRANSFORMS[param_name]
+        legend_map = LEGEND_LABELS[param_name]
 
         for c_idx, (val, seed_curves) in enumerate(sorted(value_dict.items())):
             # seed_curves is a list of (grid, values) — one per seed
@@ -337,10 +355,16 @@ def plot_results(all_results, output_path):
             median = np.nanmedian(stacked, axis=0)
             std = np.nanstd(stacked, axis=0)
 
+            # Apply y-axis transform
+            median = scale * median + offset
+            std = abs(scale) * std
+
             grid = grids[0]
-            label = f"{val}" + (" (default)" if val == default_val else "")
-            lw = 2.5 if val == default_val else 1.5
-            ls = "-" if val == default_val else "--"
+            display_val = legend_map.get(val, val)
+            is_default = val == default_val
+            label = f"{display_val}" + (" (default)" if is_default else "")
+            lw = 2.5 if is_default else 1.5
+            ls = "-" if is_default else "--"
 
             ax.plot(grid, median, color=colors[c_idx], linewidth=lw,
                     linestyle=ls, label=label)

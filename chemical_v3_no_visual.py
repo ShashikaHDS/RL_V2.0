@@ -23,7 +23,7 @@ spill_cleaned_color = (0, 128, 0)  # Green for cleaned spill
 
 
 class ChemicalClean(gym.Env):
-    def __init__(self, grid_map, num_robots, robot_positions, field_of_view, chem_fov, rewards=None):
+    def __init__(self, grid_map, num_robots, robot_positions, field_of_view, chem_fov, rewards=None, battery_level=0.75):
         super(ChemicalClean, self).__init__()
 
         default_rewards = {
@@ -34,6 +34,7 @@ class ChemicalClean(gym.Env):
             "obstacle_penalty": -5,
         }
         self.rewards = {**default_rewards, **(rewards or {})}
+        self.battery_level = battery_level
 
         # Store map generation config for reset()
         self._map_gen = MapGen()
@@ -212,7 +213,7 @@ class ChemicalClean(gym.Env):
                 
 
             # Step constraint check
-            total_allowed_steps = int(0.75 * (self.grid_size[0] * self.grid_size[1]))
+            total_allowed_steps = int(self.battery_level * (self.grid_size[0] * self.grid_size[1]))
             if self.step_count >= total_allowed_steps:
                 #print(f"Cleaned cell count: {self.cleaned_cell_count}")
                 #print(f"Exploring cells : {self.non_spill_exp_count}")
