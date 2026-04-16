@@ -21,8 +21,7 @@ pygame.display.set_mode((1, 1))
 
 from map_gen_v8 import MapGen
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import SubprocVecEnv
-from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.vec_env import DummyVecEnv
 from chemical_v3_no_visual import ChemicalClean
 
 REWARDS = {
@@ -58,7 +57,6 @@ def make_env_fn(battery_level, seed, env_id):
         env = ChemicalClean(grid_map, num_robots=1, robot_positions=robot_pos,
                             field_of_view=0, chem_fov=1, rewards=REWARDS,
                             battery_level=battery_level)
-        env = Monitor(env)
         return env
     return _init
 
@@ -66,25 +64,17 @@ def make_env_fn(battery_level, seed, env_id):
 from stable_baselines3.common.callbacks import BaseCallback
 
 class RewardLogger(BaseCallback):
-    """Logs episode rewards from infos dict."""
-    def __init__(self):
+    """Logs ep_rew_mean using SB3's internal ep_info_buffer."""
+    def __init__(self, log_freq=2048):
         super().__init__()
         self.data = []
-        self._episode_rewards = []
+        self.log_freq = log_freq
 
     def _on_step(self):
-        # Check infos for completed episodes
-        infos = self.locals.get("infos", [])
-        if infos is not None:
-            for info in infos:
-                maybe_ep = info.get("episode")
-                if maybe_ep is not None:
-                    self._episode_rewards.append(maybe_ep["r"])
-
-        # Every 2048 steps, log the mean (similar to SB3's ep_rew_mean)
-        if self.num_timesteps % 2048 == 0 and len(self._episode_rewards) > 0:
-            mean_rew = np.mean(self._episode_rewards[-100:])  # last 100 episodes
-            self.data.append((self.num_timesteps, mean_rew))
+        if self.num_timesteps % self.log_freq == 0:
+            if len(self.model.ep_info_buffer) > 0:
+                mean_rew = np.mean([ep["r"] for ep in self.model.ep_info_buffer])
+                self.data.append((self.num_timesteps, mean_rew))
         return True
 
 
@@ -104,7 +94,7 @@ if __name__ == '__main__':
 
             # Create parallel environments
             env_fns = [make_env_fn(bl, seed, i) for i in range(N_ENVS)]
-            vec_env = SubprocVecEnv(env_fns)
+            vec_env = DummyVecEnv(env_fns)
 
             model = PPO("MultiInputPolicy", vec_env, verbose=1,
                         ent_coef=0.05, device="cuda", learning_rate=3e-4,
