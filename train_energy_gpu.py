@@ -9,7 +9,6 @@ os.environ["SDL_VIDEODRIVER"] = "dummy"
 import numpy as np
 import random
 import time
-import sys
 import pickle
 
 import matplotlib
@@ -62,40 +61,23 @@ def make_env_fn(battery_level, seed, env_id):
     return _init
 
 
-class StdoutCapture:
-    def __init__(self, original):
-        self.original = original
+from stable_baselines3.common.callbacks import BaseCallback
+
+class RewardLogger(BaseCallback):
+    """Logs ep_rew_mean at each rollout using SB3's internal logger."""
+    def __init__(self):
+        super().__init__()
         self.data = []
-        self._buffer = ""
-        self._current_timesteps = None
-        self._current_reward = None
 
-    def write(self, text):
-        self.original.write(text)
-        self._buffer += text
-        for line in self._buffer.split("\n"):
-            line = line.strip()
-            if "total_timesteps" in line and "|" in line:
-                try:
-                    val = line.split("|")[-2].strip()
-                    self._current_timesteps = int(val)
-                except:
-                    pass
-            if "ep_rew_mean" in line and "|" in line:
-                try:
-                    val = line.split("|")[-2].strip()
-                    self._current_reward = float(val)
-                except:
-                    pass
-            if self._current_timesteps is not None and self._current_reward is not None:
-                self.data.append((self._current_timesteps, self._current_reward))
-                self._current_timesteps = None
-                self._current_reward = None
-        if "\n" in self._buffer:
-            self._buffer = self._buffer.rsplit("\n", 1)[-1]
+    def _on_rollout_end(self):
+        # Access SB3's internal ep_info_buffer (same as ep_rew_mean in console)
+        if len(self.model.ep_info_buffer) > 0:
+            mean_reward = np.mean([ep["r"] for ep in self.model.ep_info_buffer])
+            self.data.append((self.num_timesteps, mean_reward))
+        return True
 
-    def flush(self):
-        self.original.flush()
+    def _on_step(self):
+        return True
 
 
 if __name__ == '__main__':
@@ -123,14 +105,12 @@ if __name__ == '__main__':
                         batch_size=2048,
                         n_epochs=10)
 
-            capture = StdoutCapture(sys.stdout)
-            sys.stdout = capture
-            model.learn(total_timesteps=TOTAL_TIMESTEPS, log_interval=1)
-            sys.stdout = capture.original
+            callback = RewardLogger()
+            model.learn(total_timesteps=TOTAL_TIMESTEPS, log_interval=1, callback=callback)
 
             vec_env.close()
-            results[label].append(capture.data)
-            print(f"  Done: {len(capture.data)} data points")
+            results[label].append(callback.data)
+            print(f"  Done: {len(callback.data)} data points")
 
     # Save raw data
     with open("sensitivity_results/energy_budget_data.pkl", "wb") as f:
