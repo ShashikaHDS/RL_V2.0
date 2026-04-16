@@ -24,10 +24,10 @@ from stable_baselines3 import PPO
 from chemical_v3_no_visual import ChemicalClean
 
 REWARDS = {
-    "clean_spill": 50,
-    "consecutive_bonus": 150,
-    "revisit_penalty": -10,
-    "explore_penalty": -10,
+    "clean_spill": 5,
+    "consecutive_bonus": 20,
+    "revisit_penalty": -2,
+    "explore_penalty": -5,
     "obstacle_penalty": -5,
 }
 
