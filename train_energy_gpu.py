@@ -98,79 +98,81 @@ class StdoutCapture:
         self.original.flush()
 
 
-results = {}
-total_runs = len(BATTERY_LEVELS) * len(SEEDS)
-run = 0
+if __name__ == '__main__':
 
-for bl in BATTERY_LEVELS:
-    label = f"{int(bl*100)}%"
-    results[label] = []
+    results = {}
+    total_runs = len(BATTERY_LEVELS) * len(SEEDS)
+    run = 0
 
-    for seed in SEEDS:
-        run += 1
-        print(f"\n[{run}/{total_runs}] Battery={label}, Seed={seed}, Envs={N_ENVS}")
+    for bl in BATTERY_LEVELS:
+        label = f"{int(bl*100)}%"
+        results[label] = []
 
-        # Create parallel environments
-        env_fns = [make_env_fn(bl, seed, i) for i in range(N_ENVS)]
-        vec_env = SubprocVecEnv(env_fns)
+        for seed in SEEDS:
+            run += 1
+            print(f"\n[{run}/{total_runs}] Battery={label}, Seed={seed}, Envs={N_ENVS}")
 
-        model = PPO("MultiInputPolicy", vec_env, verbose=1,
-                    ent_coef=0.05, device="cuda", learning_rate=3e-4,
-                    seed=seed,
-                    n_steps=2048,       # steps per env before update
-                    batch_size=2048,    # larger batch for GPU
-                    n_epochs=10)
+            # Create parallel environments
+            env_fns = [make_env_fn(bl, seed, i) for i in range(N_ENVS)]
+            vec_env = SubprocVecEnv(env_fns)
 
-        capture = StdoutCapture(sys.stdout)
-        sys.stdout = capture
-        model.learn(total_timesteps=TOTAL_TIMESTEPS, log_interval=1)
-        sys.stdout = capture.original
+            model = PPO("MultiInputPolicy", vec_env, verbose=1,
+                        ent_coef=0.05, device="cuda", learning_rate=3e-4,
+                        seed=seed,
+                        n_steps=2048,
+                        batch_size=2048,
+                        n_epochs=10)
 
-        vec_env.close()
-        results[label].append(capture.data)
-        print(f"  Done: {len(capture.data)} data points")
+            capture = StdoutCapture(sys.stdout)
+            sys.stdout = capture
+            model.learn(total_timesteps=TOTAL_TIMESTEPS, log_interval=1)
+            sys.stdout = capture.original
 
-# Save raw data
-with open("sensitivity_results/energy_budget_data.pkl", "wb") as f:
-    pickle.dump(results, f)
+            vec_env.close()
+            results[label].append(capture.data)
+            print(f"  Done: {len(capture.data)} data points")
 
-# ---- Plot: median +/- std across seeds ----
-fig, ax = plt.subplots(figsize=(10, 6))
-colors = {"60%": "#E53935", "70%": "#1E88E5", "80%": "#43A047"}
+    # Save raw data
+    with open("sensitivity_results/energy_budget_data.pkl", "wb") as f:
+        pickle.dump(results, f)
 
-for label, seed_curves in results.items():
-    all_ts = set()
-    for curve in seed_curves:
-        for ts, rw in curve:
-            all_ts.add(ts)
-    grid = np.array(sorted(all_ts))
+    # ---- Plot: median +/- std across seeds ----
+    fig, ax = plt.subplots(figsize=(10, 6))
+    colors = {"60%": "#E53935", "70%": "#1E88E5", "80%": "#43A047"}
 
-    interpolated = []
-    for curve in seed_curves:
-        if not curve:
+    for label, seed_curves in results.items():
+        all_ts = set()
+        for curve in seed_curves:
+            for ts, rw in curve:
+                all_ts.add(ts)
+        grid = np.array(sorted(all_ts))
+
+        interpolated = []
+        for curve in seed_curves:
+            if not curve:
+                continue
+            ts_arr = np.array([d[0] for d in curve])
+            rw_arr = np.array([d[1] for d in curve])
+            interp = np.interp(grid, ts_arr, rw_arr)
+            interpolated.append(interp)
+
+        if not interpolated:
             continue
-        ts_arr = np.array([d[0] for d in curve])
-        rw_arr = np.array([d[1] for d in curve])
-        interp = np.interp(grid, ts_arr, rw_arr)
-        interpolated.append(interp)
 
-    if not interpolated:
-        continue
+        stacked = np.array(interpolated)
+        median = np.median(stacked, axis=0)
+        std = np.std(stacked, axis=0)
 
-    stacked = np.array(interpolated)
-    median = np.median(stacked, axis=0)
-    std = np.std(stacked, axis=0)
+        ax.plot(grid, median, color=colors[label], linewidth=2, label=label)
+        ax.fill_between(grid, median - std, median + std,
+                        color=colors[label], alpha=0.15)
 
-    ax.plot(grid, median, color=colors[label], linewidth=2, label=label)
-    ax.fill_between(grid, median - std, median + std,
-                    color=colors[label], alpha=0.15)
-
-ax.set_xlabel("Time steps", fontsize=12)
-ax.set_ylabel("Mean episode reward", fontsize=12)
-ax.set_title("Training Convergence Under Varying Energy Budgets\n(median +/- std across 5 seeds)", fontsize=13)
-ax.legend(fontsize=11)
-ax.grid(True, alpha=0.3)
-plt.tight_layout()
-plt.savefig("sensitivity_results/energy_budget_convergence.png", dpi=150)
-plt.close()
-print(f"\nPlot saved: sensitivity_results/energy_budget_convergence.png")
+    ax.set_xlabel("Time steps", fontsize=12)
+    ax.set_ylabel("Mean episode reward", fontsize=12)
+    ax.set_title("Training Convergence Under Varying Energy Budgets\n(median +/- std across 5 seeds)", fontsize=13)
+    ax.legend(fontsize=11)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig("sensitivity_results/energy_budget_convergence.png", dpi=150)
+    plt.close()
+    print(f"\nPlot saved: sensitivity_results/energy_budget_convergence.png")
