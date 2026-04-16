@@ -22,6 +22,7 @@ pygame.display.set_mode((1, 1))
 from map_gen_v8 import MapGen
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import SubprocVecEnv
+from stable_baselines3.common.monitor import Monitor
 from chemical_v3_no_visual import ChemicalClean
 
 REWARDS = {
@@ -57,6 +58,7 @@ def make_env_fn(battery_level, seed, env_id):
         env = ChemicalClean(grid_map, num_robots=1, robot_positions=robot_pos,
                             field_of_view=0, chem_fov=1, rewards=REWARDS,
                             battery_level=battery_level)
+        env = Monitor(env)
         return env
     return _init
 
@@ -64,19 +66,25 @@ def make_env_fn(battery_level, seed, env_id):
 from stable_baselines3.common.callbacks import BaseCallback
 
 class RewardLogger(BaseCallback):
-    """Logs ep_rew_mean at each rollout using SB3's internal logger."""
+    """Logs episode rewards from infos dict."""
     def __init__(self):
         super().__init__()
         self.data = []
-
-    def _on_rollout_end(self):
-        # Access SB3's internal ep_info_buffer (same as ep_rew_mean in console)
-        if len(self.model.ep_info_buffer) > 0:
-            mean_reward = np.mean([ep["r"] for ep in self.model.ep_info_buffer])
-            self.data.append((self.num_timesteps, mean_reward))
-        return True
+        self._episode_rewards = []
 
     def _on_step(self):
+        # Check infos for completed episodes
+        infos = self.locals.get("infos", [])
+        if infos is not None:
+            for info in infos:
+                maybe_ep = info.get("episode")
+                if maybe_ep is not None:
+                    self._episode_rewards.append(maybe_ep["r"])
+
+        # Every 2048 steps, log the mean (similar to SB3's ep_rew_mean)
+        if self.num_timesteps % 2048 == 0 and len(self._episode_rewards) > 0:
+            mean_rew = np.mean(self._episode_rewards[-100:])  # last 100 episodes
+            self.data.append((self.num_timesteps, mean_rew))
         return True
 
 
