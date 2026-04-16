@@ -1,6 +1,6 @@
 """
-Train 60%, 70%, 80% energy budgets using SB3 verbose logging.
-Captures ep_rew_mean from SB3's internal rolling average (same as original graph).
+Train 60%, 70%, 80% energy budgets with 5 seeds each.
+Plots median +/- std bands (same style as sensitivity analysis).
 """
 import os
 os.environ["SDL_VIDEODRIVER"] = "dummy"
@@ -8,9 +8,8 @@ os.environ["SDL_VIDEODRIVER"] = "dummy"
 import numpy as np
 import random
 import time
-import re
-import io
 import sys
+import pickle
 
 import matplotlib
 matplotlib.use("Agg")
@@ -33,10 +32,15 @@ REWARDS = {
 }
 
 BATTERY_LEVELS = [0.60, 0.70, 0.80]
+SEEDS = [0, 1, 2, 3, 4]
 TOTAL_TIMESTEPS = 500_000
 
+os.makedirs("sensitivity_results", exist_ok=True)
 
-def make_env(battery_level):
+
+def make_env(battery_level, seed):
+    random.seed(seed)
+    np.random.seed(seed)
     grid_maps = MapGen()
     grid_map = np.array(grid_maps.generate_main_with_subclusters_map(
         20, 20, (30, 60),
@@ -53,10 +57,9 @@ def make_env(battery_level):
 
 
 class StdoutCapture:
-    """Captures stdout to extract ep_rew_mean and total_timesteps from SB3 output."""
     def __init__(self, original):
         self.original = original
-        self.data = []  # (timesteps, ep_rew_mean)
+        self.data = []
         self._buffer = ""
         self._current_timesteps = None
         self._current_reward = None
@@ -64,7 +67,6 @@ class StdoutCapture:
     def write(self, text):
         self.original.write(text)
         self._buffer += text
-        # Parse SB3 output lines
         for line in self._buffer.split("\n"):
             line = line.strip()
             if "total_timesteps" in line and "|" in line:
@@ -83,7 +85,6 @@ class StdoutCapture:
                 self.data.append((self._current_timesteps, self._current_reward))
                 self._current_timesteps = None
                 self._current_reward = None
-        # Keep only last incomplete line in buffer
         if "\n" in self._buffer:
             self._buffer = self._buffer.rsplit("\n", 1)[-1]
 
@@ -91,40 +92,73 @@ class StdoutCapture:
         self.original.flush()
 
 
+# ---- Train all combinations ----
+# results[label] = list of 5 seed curves, each curve = [(ts, rew), ...]
 results = {}
+total_runs = len(BATTERY_LEVELS) * len(SEEDS)
+run = 0
 
 for bl in BATTERY_LEVELS:
     label = f"{int(bl*100)}%"
-    print(f"\n  Training {label}...")
+    results[label] = []
 
-    env = make_env(bl)
-    model = PPO("MultiInputPolicy", env, verbose=1,
-                ent_coef=0.05, device="cuda", learning_rate=3e-4)
+    for seed in SEEDS:
+        run += 1
+        print(f"\n[{run}/{total_runs}] Battery={label}, Seed={seed}")
 
-    # Capture SB3's ep_rew_mean output
-    capture = StdoutCapture(sys.stdout)
-    sys.stdout = capture
+        env = make_env(bl, seed)
+        model = PPO("MultiInputPolicy", env, verbose=1,
+                    ent_coef=0.05, device="cpu", learning_rate=3e-4,
+                    seed=seed)
 
-    model.learn(total_timesteps=TOTAL_TIMESTEPS, log_interval=1)
+        capture = StdoutCapture(sys.stdout)
+        sys.stdout = capture
+        model.learn(total_timesteps=TOTAL_TIMESTEPS, log_interval=1)
+        sys.stdout = capture.original
 
-    sys.stdout = capture.original
-    results[label] = capture.data
-    print(f"  {label} done: {len(capture.data)} data points")
+        results[label].append(capture.data)
+        print(f"  Done: {len(capture.data)} data points")
 
-# Plot - same style as original pink graph
+# Save raw data
+with open("sensitivity_results/energy_budget_data.pkl", "wb") as f:
+    pickle.dump(results, f)
+
+# ---- Plot: median +/- std across seeds ----
 fig, ax = plt.subplots(figsize=(10, 6))
 colors = {"60%": "#E53935", "70%": "#1E88E5", "80%": "#43A047"}
 
-for label, data in results.items():
-    if not data:
+for label, seed_curves in results.items():
+    # Interpolate all seeds onto a common timestep grid
+    all_ts = set()
+    for curve in seed_curves:
+        for ts, rw in curve:
+            all_ts.add(ts)
+    grid = np.array(sorted(all_ts))
+
+    # For each seed, interpolate onto grid
+    interpolated = []
+    for curve in seed_curves:
+        if not curve:
+            continue
+        ts_arr = np.array([d[0] for d in curve])
+        rw_arr = np.array([d[1] for d in curve])
+        interp = np.interp(grid, ts_arr, rw_arr)
+        interpolated.append(interp)
+
+    if not interpolated:
         continue
-    ts = [d[0] for d in data]
-    rw = [d[1] for d in data]
-    ax.plot(ts, rw, color=colors[label], linewidth=1.5, label=label)
+
+    stacked = np.array(interpolated)
+    median = np.median(stacked, axis=0)
+    std = np.std(stacked, axis=0)
+
+    ax.plot(grid, median, color=colors[label], linewidth=2, label=label)
+    ax.fill_between(grid, median - std, median + std,
+                    color=colors[label], alpha=0.15)
 
 ax.set_xlabel("Time steps", fontsize=12)
 ax.set_ylabel("Mean episode reward", fontsize=12)
-ax.set_title("Training Convergence Under Varying Energy Budgets", fontsize=14)
+ax.set_title("Training Convergence Under Varying Energy Budgets\n(median +/- std across 5 seeds)", fontsize=13)
 ax.legend(fontsize=11)
 ax.grid(True, alpha=0.3)
 plt.tight_layout()
