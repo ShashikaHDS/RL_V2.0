@@ -1,31 +1,20 @@
 """
 Train 60%, 70%, 80% energy budgets with 5 seeds each.
-Plots median +/- std bands (same style as sensitivity analysis).
+Runs all 15 jobs in parallel using multiprocessing.
+Plots median +/- std bands.
 """
 import os
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 
 import numpy as np
-import random
-import time
-import sys
 import pickle
-
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-import pygame
-pygame.init()
-pygame.display.set_mode((1, 1))
-
-from map_gen_v8 import MapGen
-from stable_baselines3 import PPO
-from chemical_v3_no_visual import ChemicalClean
-
 REWARDS = {
     "clean_spill": 5,
-    "consecutive_bonus": 20,
+    "consecutive_bonus": 40,
     "revisit_penalty": -2,
     "explore_penalty": -5,
     "obstacle_penalty": -5,
@@ -33,14 +22,27 @@ REWARDS = {
 
 BATTERY_LEVELS = [0.60, 0.70, 0.80]
 SEEDS = [0, 1, 2, 3, 4]
-TOTAL_TIMESTEPS = 500_000
-
-os.makedirs("sensitivity_results", exist_ok=True)
+TOTAL_TIMESTEPS = 2_000_000
 
 
-def make_env(battery_level, seed):
+def train_one(args):
+    bl, seed = args
+    label = f"{int(bl*100)}%"
+
+    import os, random, numpy as np
+    os.environ["SDL_VIDEODRIVER"] = "dummy"
+
+    import pygame
+    pygame.init()
+    pygame.display.set_mode((1, 1))
+
+    from map_gen_v8 import MapGen
+    from stable_baselines3 import PPO
+    from chemical_v3_no_visual import ChemicalClean
+
     random.seed(seed)
     np.random.seed(seed)
+
     grid_maps = MapGen()
     grid_map = np.array(grid_maps.generate_main_with_subclusters_map(
         20, 20, (30, 60),
@@ -52,116 +54,86 @@ def make_env(battery_level, seed):
     robot_pos = np.array([tuple(free_cells[i]) for i in idx])
     env = ChemicalClean(grid_map, num_robots=1, robot_positions=robot_pos,
                         field_of_view=0, chem_fov=1, rewards=REWARDS,
-                        battery_level=battery_level)
-    return env
+                        battery_level=bl)
+
+    model = PPO("MultiInputPolicy", env, verbose=0,
+                ent_coef=0.05, device="cpu", learning_rate=3e-4, seed=seed)
+
+    # Collect ep_rew_mean
+    data = []
+    steps_per_learn = 2048
+    total = 0
+    while total < TOTAL_TIMESTEPS:
+        model.learn(total_timesteps=steps_per_learn, log_interval=0, reset_num_timesteps=False)
+        total += steps_per_learn
+        if len(model.ep_info_buffer) > 0:
+            mean_rew = np.mean([ep["r"] for ep in model.ep_info_buffer])
+            data.append((total, mean_rew))
+
+    print(f"  {label} seed={seed}: {len(data)} points")
+    return (label, seed, data)
 
 
-class StdoutCapture:
-    def __init__(self, original):
-        self.original = original
-        self.data = []
-        self._buffer = ""
-        self._current_timesteps = None
-        self._current_reward = None
+if __name__ == '__main__':
+    from multiprocessing import Pool
 
-    def write(self, text):
-        self.original.write(text)
-        self._buffer += text
-        for line in self._buffer.split("\n"):
-            line = line.strip()
-            if "total_timesteps" in line and "|" in line:
-                try:
-                    val = line.split("|")[-2].strip()
-                    self._current_timesteps = int(val)
-                except:
-                    pass
-            if "ep_rew_mean" in line and "|" in line:
-                try:
-                    val = line.split("|")[-2].strip()
-                    self._current_reward = float(val)
-                except:
-                    pass
-            if self._current_timesteps is not None and self._current_reward is not None:
-                self.data.append((self._current_timesteps, self._current_reward))
-                self._current_timesteps = None
-                self._current_reward = None
-        if "\n" in self._buffer:
-            self._buffer = self._buffer.rsplit("\n", 1)[-1]
+    os.makedirs("sensitivity_results", exist_ok=True)
 
-    def flush(self):
-        self.original.flush()
+    jobs = [(bl, seed) for bl in BATTERY_LEVELS for seed in SEEDS]
+    print(f"Running {len(jobs)} jobs in parallel across 15 cores...")
+    print(f"Timesteps per job: {TOTAL_TIMESTEPS:,}")
 
+    with Pool(15) as pool:
+        all_results = pool.map(train_one, jobs)
 
-# ---- Train all combinations ----
-# results[label] = list of 5 seed curves, each curve = [(ts, rew), ...]
-results = {}
-total_runs = len(BATTERY_LEVELS) * len(SEEDS)
-run = 0
+    # Organize results
+    results = {}
+    for label, seed, data in all_results:
+        if label not in results:
+            results[label] = []
+        results[label].append(data)
 
-for bl in BATTERY_LEVELS:
-    label = f"{int(bl*100)}%"
-    results[label] = []
+    # Save raw data
+    with open("sensitivity_results/energy_budget_data.pkl", "wb") as f:
+        pickle.dump(results, f)
 
-    for seed in SEEDS:
-        run += 1
-        print(f"\n[{run}/{total_runs}] Battery={label}, Seed={seed}")
+    # ---- Plot: median +/- std across seeds ----
+    fig, ax = plt.subplots(figsize=(10, 6))
+    colors = {"60%": "#E53935", "70%": "#1E88E5", "80%": "#43A047"}
 
-        env = make_env(bl, seed)
-        model = PPO("MultiInputPolicy", env, verbose=1,
-                    ent_coef=0.05, device="cpu", learning_rate=3e-4,
-                    seed=seed)
+    for label, seed_curves in results.items():
+        all_ts = set()
+        for curve in seed_curves:
+            for ts, rw in curve:
+                all_ts.add(ts)
+        grid = np.array(sorted(all_ts))
 
-        capture = StdoutCapture(sys.stdout)
-        sys.stdout = capture
-        model.learn(total_timesteps=TOTAL_TIMESTEPS, log_interval=1)
-        sys.stdout = capture.original
+        interpolated = []
+        for curve in seed_curves:
+            if not curve:
+                continue
+            ts_arr = np.array([d[0] for d in curve])
+            rw_arr = np.array([d[1] for d in curve])
+            interp = np.interp(grid, ts_arr, rw_arr)
+            interpolated.append(interp)
 
-        results[label].append(capture.data)
-        print(f"  Done: {len(capture.data)} data points")
-
-# Save raw data
-with open("sensitivity_results/energy_budget_data.pkl", "wb") as f:
-    pickle.dump(results, f)
-
-# ---- Plot: median +/- std across seeds ----
-fig, ax = plt.subplots(figsize=(10, 6))
-colors = {"60%": "#E53935", "70%": "#1E88E5", "80%": "#43A047"}
-
-for label, seed_curves in results.items():
-    # Interpolate all seeds onto a common timestep grid
-    all_ts = set()
-    for curve in seed_curves:
-        for ts, rw in curve:
-            all_ts.add(ts)
-    grid = np.array(sorted(all_ts))
-
-    # For each seed, interpolate onto grid
-    interpolated = []
-    for curve in seed_curves:
-        if not curve:
+        if not interpolated:
             continue
-        ts_arr = np.array([d[0] for d in curve])
-        rw_arr = np.array([d[1] for d in curve])
-        interp = np.interp(grid, ts_arr, rw_arr)
-        interpolated.append(interp)
 
-    if not interpolated:
-        continue
+        stacked = np.array(interpolated)
+        median = np.median(stacked, axis=0)
+        std = np.std(stacked, axis=0)
 
-    stacked = np.array(interpolated)
-    median = np.median(stacked, axis=0)
-    std = np.std(stacked, axis=0)
+        ax.plot(grid, median, color=colors[label], linewidth=2, label=label)
+        ax.fill_between(grid, median - std, median + std,
+                        color=colors[label], alpha=0.15)
 
-    ax.plot(grid, median, color=colors[label], linewidth=2, label=label)
-    ax.fill_between(grid, median - std, median + std,
-                    color=colors[label], alpha=0.15)
-
-ax.set_xlabel("Time steps", fontsize=12)
-ax.set_ylabel("Mean episode reward", fontsize=12)
-ax.set_title("Training Convergence Under Varying Energy Budgets\n(median +/- std across 5 seeds)", fontsize=13)
-ax.legend(fontsize=11)
-ax.grid(True, alpha=0.3)
-plt.tight_layout()
-plt.savefig("sensitivity_results/energy_budget_convergence.png", dpi=150)
-plt.close()
-print(f"\nPlot saved: sensitivity_results/energy_budget_convergence.png")
+    ax.set_xlabel("Time steps", fontsize=12)
+    ax.set_ylabel("Mean episode reward", fontsize=12)
+    ax.set_title("Training Convergence Under Varying Energy Budgets\n(median +/- std across 5 seeds)", fontsize=13)
+    ax.legend(fontsize=11)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig("sensitivity_results/energy_budget_convergence.png", dpi=150)
+    plt.close()
+    print(f"\nPlot saved: sensitivity_results/energy_budget_convergence.png")
